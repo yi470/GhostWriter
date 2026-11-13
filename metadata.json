@@ -1,0 +1,6 @@
+{
+  "name": "Correspondent",
+  "description": "A formal letter-writing assistant that transforms everyday problem descriptions into clear, well-structured, editable correspondence.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
