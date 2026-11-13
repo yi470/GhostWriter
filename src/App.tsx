@@ -77,6 +77,7 @@ export function App() {
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
   const [isRefining, setIsRefining] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const [revisionError, setRevisionError] = useState<string | null>(null);
   const [lastSavedLabel, setLastSavedLabel] = useState<string>('');
 
   const [activeOverlay, setActiveOverlay] = useState<'scenarios' | 'drafts' | 'guide' | null>(null);
@@ -162,38 +163,112 @@ export function App() {
   };
 
   const parseApiResponse = async (
-    response: Response
+    response: Response,
+    endpoint: string
   ): Promise<{ ok: boolean; data: any; errorMessage: string }> => {
     const contentType = response.headers.get('content-type') || '';
+
     if (contentType.includes('application/json')) {
       try {
         const json = await response.json();
+        if (!json || typeof json !== 'object') {
+          console.error(`[API Invalid JSON Root on ${endpoint}]`, json);
+          return {
+            ok: false,
+            data: null,
+            errorMessage: `Invalid response from ${endpoint}: Expected a JSON object payload.`,
+          };
+        }
+
         if (!response.ok) {
-          const errMsg = json.error || `Request failed with status ${response.status}`;
           if (json.details) {
-            console.error('[API Error Details]', json.details);
+            console.error(`[API Error Details on ${endpoint}]`, json.details);
           }
+
+          if (response.status === 404 || json.code === 'MISSING_ROUTE') {
+            return {
+              ok: false,
+              data: json,
+              errorMessage:
+                json.error ||
+                `Missing API route (404): ${endpoint} was not found on the server. Ensure the /api/letters/* serverless functions are deployed.`,
+            };
+          }
+
+          if (json.code === 'MISSING_ENV_VAR') {
+            return {
+              ok: false,
+              data: json,
+              errorMessage:
+                json.error ||
+                'Missing server environment variable: GEMINI_API_KEY is not configured on the server.',
+            };
+          }
+
+          if (json.code === 'INVALID_RESPONSE') {
+            return {
+              ok: false,
+              data: json,
+              errorMessage:
+                json.error ||
+                `Invalid model response on ${endpoint}: The upstream model returned malformed or incomplete data.`,
+            };
+          }
+
+          if (json.code === 'UPSTREAM_MODEL_FAILURE') {
+            return {
+              ok: false,
+              data: json,
+              errorMessage:
+                json.error ||
+                `Upstream model failure on ${endpoint}: The Gemini service could not complete the request right now.`,
+            };
+          }
+
+          const errMsg =
+            json.error || `Request to ${endpoint} failed with status ${response.status}.`;
           return { ok: false, data: json, errorMessage: errMsg };
         }
+
         return { ok: true, data: json, errorMessage: '' };
       } catch (jsonErr) {
-        console.error('[API JSON Parse Error]', jsonErr);
+        console.error(`[API JSON Parse Error on ${endpoint}]`, jsonErr);
         return {
           ok: false,
           data: null,
-          errorMessage: 'Server returned an invalid JSON response. Please try again.',
+          errorMessage: `Invalid response from ${endpoint}: Server returned malformed JSON.`,
         };
       }
     } else {
       const rawText = await response.text();
-      console.error(`[API Non-JSON Response ${response.status}]`, rawText.slice(0, 300));
+      console.error(
+        `[API Non-JSON Response ${response.status} on ${endpoint}]`,
+        rawText.slice(0, 300)
+      );
+
+      if (response.status === 404) {
+        return {
+          ok: false,
+          data: null,
+          errorMessage: `Missing API route (404): ${endpoint} was not found on the server. Ensure the serverless API routes (/api/letters/*) are deployed.`,
+        };
+      }
+
+      if (response.ok) {
+        return {
+          ok: false,
+          data: null,
+          errorMessage: `Invalid response from ${endpoint}: Expected application/json, but received ${contentType || 'non-JSON content'}.`,
+        };
+      }
+
       return {
         ok: false,
         data: null,
         errorMessage:
           response.status >= 500
-            ? 'The letter generation service is temporarily unavailable. Please try again in a moment.'
-            : `Request error (${response.status}). Please check your input and try again.`,
+            ? `Upstream or server failure (${response.status}) on ${endpoint}. Check server logs and verify GEMINI_API_KEY is configured.`
+            : `Request error (${response.status}) on ${endpoint}. Please try again.`,
       };
     }
   };
@@ -204,11 +279,13 @@ export function App() {
     submittedAnswers: Record<string, string>
   ) => {
     setError(null);
+    setRevisionError(null);
     setIsSummarizing(true);
     setEffectiveClarifications(submittedAnswers);
 
     try {
-      const response = await fetch('/api/letters/summarize', {
+      const endpoint = '/api/letters/summarize';
+      const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -221,16 +298,26 @@ export function App() {
         }),
       });
 
-      const result = await parseApiResponse(response);
+      const result = await parseApiResponse(response, endpoint);
       if (!result.ok) {
         throw new Error(result.errorMessage);
       }
 
       const data = result.data;
+      if (
+        typeof data.situation !== 'string' ||
+        typeof data.impact !== 'string' ||
+        typeof data.requestedResolution !== 'string'
+      ) {
+        throw new Error(
+          'Invalid response from /api/letters/summarize: Summary fields were missing.'
+        );
+      }
+
       const draftSummary: CaseSummary = {
         situation: data.situation || problem.trim(),
-        impact: data.impact || '',
-        requestedResolution: data.requestedResolution || '',
+        impact: data.impact,
+        requestedResolution: data.requestedResolution,
         keyFacts: Array.isArray(data.keyFacts) ? data.keyFacts : [],
       };
 
@@ -255,11 +342,13 @@ export function App() {
     }
 
     setError(null);
+    setRevisionError(null);
     setConfirmedSummary(null);
     setIsAnalyzing(true);
 
     try {
-      const clarifyRes = await fetch('/api/letters/clarify', {
+      const endpoint = '/api/letters/clarify';
+      const clarifyRes = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -272,10 +361,16 @@ export function App() {
         }),
       });
 
-      const clarifyResult = await parseApiResponse(clarifyRes);
+      const clarifyResult = await parseApiResponse(clarifyRes, endpoint);
 
       if (!clarifyResult.ok) {
         throw new Error(clarifyResult.errorMessage);
+      }
+
+      if (!clarifyResult.data || !Array.isArray(clarifyResult.data.questions)) {
+        throw new Error(
+          'Invalid response from /api/letters/clarify: Expected clarification questions array.'
+        );
       }
 
       if (
@@ -353,10 +448,12 @@ export function App() {
     };
 
     setError(null);
+    setRevisionError(null);
     setIsGenerating(true);
 
     try {
-      const response = await fetch('/api/letters/generate', {
+      const endpoint = '/api/letters/generate';
+      const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -374,20 +471,25 @@ export function App() {
         }),
       });
 
-      const result = await parseApiResponse(response);
+      const result = await parseApiResponse(response, endpoint);
 
       if (!result.ok) {
         throw new Error(result.errorMessage);
       }
 
       const data = result.data;
+      if (typeof data.letterBody !== 'string' || !data.letterBody.trim()) {
+        throw new Error(
+          'Invalid response from /api/letters/generate: Generated letter text was empty.'
+        );
+      }
 
       if (letterBody.trim()) {
         setPreviousRevisions((prev) => [...prev.slice(-9), letterBody]);
       }
 
       const generatedSubject = data.subject || 'Formal Correspondence';
-      const generatedBody = data.letterBody || '';
+      const generatedBody = data.letterBody;
       const generatedNote = data.editorialNote || '';
 
       setConfirmedSummary(userVerifiedSummary);
@@ -426,10 +528,12 @@ export function App() {
     if (!letterBody.trim()) return false;
 
     setError(null);
+    setRevisionError(null);
     setIsRefining(true);
 
     try {
-      const response = await fetch('/api/letters/refine', {
+      const endpoint = '/api/letters/refine';
+      const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -440,7 +544,7 @@ export function App() {
         }),
       });
 
-      const result = await parseApiResponse(response);
+      const result = await parseApiResponse(response, endpoint);
 
       if (!result.ok) {
         throw new Error(result.errorMessage);
@@ -449,13 +553,18 @@ export function App() {
       const data = result.data;
 
       // Unclear / multi-interpretable request: do NOT guess or overwrite the current draft
-      if (
-        data.isAmbiguous &&
-        Array.isArray(data.options) &&
-        data.options.length >= 2 &&
-        data.options[0]?.letterBody &&
-        data.options[1]?.letterBody
-      ) {
+      if (data.isAmbiguous) {
+        if (
+          !Array.isArray(data.options) ||
+          data.options.length < 2 ||
+          !data.options[0]?.letterBody ||
+          !data.options[1]?.letterBody
+        ) {
+          throw new Error(
+            'Invalid response from /api/letters/refine: Expected two revision options for an unclear request.'
+          );
+        }
+
         setPendingRevision({
           instruction,
           ambiguityExplanation:
@@ -466,12 +575,18 @@ export function App() {
         return true;
       }
 
+      if (typeof data.letterBody !== 'string' || !data.letterBody.trim()) {
+        throw new Error(
+          'Invalid response from /api/letters/refine: Revised letter text was empty.'
+        );
+      }
+
       // Clear / concrete request: apply directly while preserving Undo history
       setPendingRevision(null);
       setPreviousRevisions((prev) => [...prev.slice(-9), letterBody]);
 
       const nextSubject = data.subject || subject;
-      const nextBody = data.letterBody || letterBody;
+      const nextBody = data.letterBody;
       const nextNote = data.editorialNote || editorialNote;
 
       setSubject(nextSubject);
@@ -492,7 +607,7 @@ export function App() {
     } catch (err: unknown) {
       console.error('[handleRefine error]', err);
       const msg = err instanceof Error ? err.message : 'Could not refine the letter right now.';
-      setError(msg);
+      setRevisionError(msg);
       return false;
     } finally {
       setIsRefining(false);
@@ -618,6 +733,7 @@ export function App() {
 
   const handleNewLetter = () => {
     setError(null);
+    setRevisionError(null);
     setActiveDraftId(null);
     setProblem('');
     setTone(LetterTone.Diplomatic);
@@ -696,6 +812,7 @@ export function App() {
               canUndoRevision={previousRevisions.length > 0}
               lastSavedLabel={lastSavedLabel}
               pendingRevision={pendingRevision}
+              revisionError={revisionError}
               onSubjectChange={handleSubjectEdit}
               onLetterBodyChange={handleLetterBodyEdit}
               onTypefaceChange={setPaperTypeface}

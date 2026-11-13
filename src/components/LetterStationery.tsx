@@ -13,6 +13,7 @@ interface LetterStationeryProps {
   canUndoRevision: boolean;
   lastSavedLabel: string;
   pendingRevision: PendingRevisionChoice | null;
+  revisionError?: string | null;
   onSubjectChange: (value: string) => void;
   onLetterBodyChange: (value: string) => void;
   onTypefaceChange: (typeface: PaperTypeface) => void;
@@ -64,6 +65,7 @@ export const LetterStationery: React.FC<LetterStationeryProps> = ({
   canUndoRevision,
   lastSavedLabel,
   pendingRevision,
+  revisionError,
   onSubjectChange,
   onLetterBodyChange,
   onTypefaceChange,
@@ -304,6 +306,15 @@ export const LetterStationery: React.FC<LetterStationeryProps> = ({
               </span>
             )}
           </div>
+
+          {revisionError && (
+            <div
+              role="alert"
+              className="rounded-lg border border-red-200 bg-red-50/80 px-3.5 py-2.5 text-xs text-red-800 leading-relaxed"
+            >
+              {revisionError}
+            </div>
+          )}
         </div>
       )}
 
